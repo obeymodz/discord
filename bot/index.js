@@ -155,7 +155,7 @@ const commands = [
     .addStringOption((o) => o.setName('text').setDescription('Message').setRequired(true)),
 ].map((c) => c.toJSON());
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`[bot] ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
   try {
@@ -173,10 +173,10 @@ client.on('interactionCreate', async (i) => {
   if (!i.isChatInputCommand()) return;
 
   if (ADMIN_ROLE && !i.member?.roles?.cache?.has(ADMIN_ROLE))
-    return i.reply({ content: 'Not authorised.', ephemeral: true });
+    return i.reply({ content: 'Not authorised.', flags: 64 });
 
   const hwid = i.options.getString('hwid');
-  const ok = (m) => i.reply({ content: m, ephemeral: true });
+  const ok = (m) => i.reply({ content: m, flags: 64 });
 
   const edit = (fn, msg) => {
     const rec = store.get(hwid);
