@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import http from 'node:http';
+import crypto from 'node:crypto';
 import {
   Client, GatewayIntentBits, REST, Routes,
   SlashCommandBuilder, EmbedBuilder,
@@ -32,12 +33,44 @@ import { store } from './store.js';
 
 const {
   BOT_TOKEN, APP_ID, GUILD_ID, ADMIN_ROLE,
-  PORT = 8080, LOG_CHANNEL,
+  PORT = 8080, LOG_CHANNEL, SIGN_KEY,
 } = process.env;
 
 if (!BOT_TOKEN || !APP_ID) {
   console.error('Set BOT_TOKEN and APP_ID.');
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+//  Response signing (ECDSA P-256)
+//
+//  SIGN_KEY is the PEM private key from `node gen-keys.js`, newlines as \n.
+//  Without it the server replies unsigned and the client (also unconfigured)
+//  trusts it -- fine for first setup, but set it before you rely on blocking.
+//
+//  Only the security fields are signed, as "<nonce>|<allow>|<unload>", matching
+//  Remote::VerifyReply in the DLL byte for byte.
+// ---------------------------------------------------------------------------
+let signKey = null;
+if (SIGN_KEY) {
+  try {
+    signKey = crypto.createPrivateKey(SIGN_KEY.replace(/\\n/g, '\n'));
+    console.log('[sign] response signing ENABLED');
+  } catch (e) {
+    console.error('[sign] bad SIGN_KEY, signing disabled:', e.message);
+  }
+} else {
+  console.log('[sign] SIGN_KEY not set -- replies are UNSIGNED');
+}
+
+function signReply(nonce, allow, unload) {
+  if (!signKey) return '';
+  const msg = `${nonce}|${allow ? 1 : 0}|${unload ? 1 : 0}`;
+  // ieee-p1363 => raw r||s (64 bytes), which is what the client's BCrypt
+  // verify expects. The default DER encoding would NOT verify.
+  return crypto
+    .sign('sha256', Buffer.from(msg), { key: signKey, dsaEncoding: 'ieee-p1363' })
+    .toString('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -83,11 +116,17 @@ const server = http.createServer((req, res) => {
       beats: (prev?.beats ?? 0) + 1,
     };
 
+    const allow = !rec.blocked;
+    const unload = rec.unload;
+    const nonce = String(body.nonce || '').slice(0, 64);
+
     const reply = {
-      allow: !rec.blocked,
-      unload: rec.unload,
+      allow,
+      unload,
       msg: rec.msg,
       level: rec.level,
+      nonce,                          // echo it back inside the signed data
+      sig: signReply(nonce, allow, unload),
     };
 
     // One-shot: clear after delivery so an /unload fires once rather than on
