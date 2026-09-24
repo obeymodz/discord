@@ -59,21 +59,32 @@ function saveLoaderCfg() {
   }
 }
 
-function downloadUrl(url) {
+function downloadUrl(url, redirects = 0) {
   return new Promise((resolve, reject) => {
-    const get = (u) => {
-      const mod = u.startsWith('https') ? https : http;
-      mod.get(u, { headers: { 'User-Agent': 'aurora-relay/1.0' } }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302)
-          return get(res.headers.location);
-        if (res.statusCode !== 200)
-          return reject(new Error(`HTTP ${res.statusCode}`));
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve(Buffer.concat(chunks)));
-      }).on('error', reject);
+    if (redirects > 5) return reject(new Error('too many redirects'));
+    const mod = url.startsWith('https') ? https : http;
+    const opts = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Connection': 'keep-alive',
+      },
     };
-    get(url);
+    mod.get(url, opts, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
+        res.resume();
+        return downloadUrl(res.headers.location, redirects + 1).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
   });
 }
 
