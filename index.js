@@ -417,20 +417,12 @@ client.on('interactionCreate', async (i) => {
       return ok(`Queued for ${n} client${n === 1 ? '' : 's'}.`);
     }
     case 'release': {
-      const ver  = i.options.getString('version');
-      const att  = i.options.getAttachment('file');
-      await i.deferReply({ flags: 64 });
-      try {
-        const buf = await downloadUrl(att.url);
-        const url = await uploadToCatbox(att.name, buf);
-        loaderCfg.version    = ver;
-        loaderCfg.update_url = url;
-        saveLoaderCfg();
-        await i.editReply(`Released **v${ver}** → \`${url}\`\nAll clients will update on next launch.`);
-      } catch (e) {
-        await i.editReply(`Release failed: ${e.message}`);
-      }
-      break;
+      const ver = i.options.getString('version');
+      const att = i.options.getAttachment('file');
+      loaderCfg.version    = ver;
+      loaderCfg.update_url = att.url;
+      saveLoaderCfg();
+      return ok(`Released **v${ver}**\nClients will update on next launch.\n\n> URL expires ~24h — re-run \`/release\` if older clients still need it.`);
     }
     case 'loaderconfig': {
       const sub = i.options.getSubcommand();
