@@ -24,12 +24,100 @@
 // ---------------------------------------------------------------------------
 
 import http from 'node:http';
+import https from 'node:https';
+import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   Client, GatewayIntentBits, REST, Routes,
   SlashCommandBuilder, EmbedBuilder,
 } from 'discord.js';
 import { store } from './store.js';
+import { chat } from './chat.js';
+
+// ---------------------------------------------------------------------------
+//  Loader config — served at GET /config for the PHANTOM loader to fetch
+// ---------------------------------------------------------------------------
+const CFG_DIR  = process.env.DATA_DIR || '.';
+const CFG_FILE = path.join(CFG_DIR, 'loader_config.json');
+
+let loaderCfg = { version: '1', update_url: '', motd: '' };
+try {
+  loaderCfg = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'));
+  console.log('[cfg] loaded loader config');
+} catch {
+  console.log('[cfg] no loader_config.json — using defaults');
+}
+
+function saveLoaderCfg() {
+  try {
+    const tmp = CFG_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(loaderCfg, null, 2));
+    fs.renameSync(tmp, CFG_FILE);
+  } catch (e) {
+    console.error('[cfg] save failed:', e.message);
+  }
+}
+
+function downloadUrl(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error('too many redirects'));
+    const mod = url.startsWith('https') ? https : http;
+    const opts = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Connection': 'keep-alive',
+      },
+    };
+    mod.get(url, opts, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
+        res.resume();
+        return downloadUrl(res.headers.location, redirects + 1).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+function uploadToCatbox(filename, buf) {
+  return new Promise((resolve, reject) => {
+    const boundary = '----CB' + crypto.randomBytes(8).toString('hex');
+    const CRLF = '\r\n';
+    const head = Buffer.from(
+      `--${boundary}${CRLF}Content-Disposition: form-data; name="reqtype"${CRLF}${CRLF}fileupload${CRLF}` +
+      `--${boundary}${CRLF}Content-Disposition: form-data; name="fileToUpload"; filename="${filename}"${CRLF}` +
+      `Content-Type: application/octet-stream${CRLF}${CRLF}`
+    );
+    const foot = Buffer.from(`${CRLF}--${boundary}--${CRLF}`);
+    const body = Buffer.concat([head, buf, foot]);
+    const req = https.request({
+      hostname: 'catbox.moe', port: 443, path: '/user/api.php', method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        if (data.startsWith('https://')) resolve(data.trim());
+        else reject(new Error('catbox: ' + data.slice(0, 80)));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 const {
   BOT_TOKEN, APP_ID, GUILD_ID, ADMIN_ROLE,
@@ -76,23 +164,80 @@ function signReply(nonce, allow, unload) {
 // ---------------------------------------------------------------------------
 //  HTTP: the DLL heartbeat
 // ---------------------------------------------------------------------------
+// A client counts as online if it has beaten recently. 90s is three heartbeat
+// intervals, so one dropped request does not make someone flicker offline.
+const ONLINE_MS = 90_000;
+function onlineCount() {
+  const now = Date.now();
+  let n = 0;
+  for (const [, rec] of store.all()) {
+    if (!rec.blocked && rec.last && now - rec.last < ONLINE_MS) n++;
+  }
+  return n;
+}
+
+function readBody(req, res, limit, done) {
+  let raw = '';
+  req.on('data', (c) => {
+    raw += c;
+    if (raw.length > limit) req.destroy();   // nothing legitimate is this big
+  });
+  req.on('end', () => done(raw));
+}
+
 const server = http.createServer((req, res) => {
+  const send = (o) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(o));
+  };
+
+  // -------------------------------------------------------------------------
+  //  General chat: one poll doubles as send + receive + presence.
+  //
+  //  The message text is never parsed here or anywhere downstream -- see
+  //  chat.js. A blocked client is silently read-only rather than told, because
+  //  telling it would just confirm the block.
+  // -------------------------------------------------------------------------
+  if (req.method === 'POST' && req.url.startsWith('/chat')) {
+    readBody(req, res, 2048, (raw) => {
+      let body;
+      try { body = JSON.parse(raw); }
+      catch { return send({ online: onlineCount(), messages: [] }); }
+
+      const hwid = String(body.hwid || '').slice(0, 64);
+      if (!hwid) return send({ online: onlineCount(), messages: [] });
+
+      const rec = store.get(hwid);
+      let error = '';
+      if (typeof body.text === 'string' && body.text.trim() && !rec?.blocked) {
+        const r = chat.post(hwid, body.name, body.text);
+        if (!r.ok) error = r.error;
+      }
+
+      const since = Number(body.since);
+      send({
+        online: onlineCount(),
+        head: chat.head(),
+        error,
+        messages: chat.since(since),
+      });
+    });
+    return;
+  }
+
+  // Loader config — PHANTOM loader fetches this to check for updates
+  if (req.method === 'GET' && req.url === '/config') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(loaderCfg));
+    return;
+  }
+
   if (req.method !== 'POST' || !req.url.startsWith('/heartbeat')) {
     res.writeHead(200).end('aurora relay');
     return;
   }
 
-  let raw = '';
-  req.on('data', (c) => {
-    raw += c;
-    if (raw.length > 4096) req.destroy();   // nothing legitimate is this big
-  });
-
-  req.on('end', () => {
-    const send = (o) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(o));
-    };
+  readBody(req, res, 4096, (raw) => {
 
     let body;
     try { body = JSON.parse(raw); }
@@ -125,6 +270,7 @@ const server = http.createServer((req, res) => {
       unload,
       msg: rec.msg,
       level: rec.level,
+      online: onlineCount(),          // shown in the menu header
       nonce,                          // echo it back inside the signed data
       sig: signReply(nonce, allow, unload),
     };
@@ -192,6 +338,16 @@ const commands = [
       { name: 'warn', value: 'warn' }, { name: 'error', value: 'error' })),
   new SlashCommandBuilder().setName('broadcast').setDescription('Message every client')
     .addStringOption((o) => o.setName('text').setDescription('Message').setRequired(true)),
+  new SlashCommandBuilder().setName('release').setDescription('Push a new loader build — triggers auto-update on all clients')
+    .addStringOption((o) => o.setName('version').setDescription('Version number e.g. 3 or 3.1').setRequired(true))
+    .addStringOption((o) => o.setName('url').setDescription('Direct download link (catbox .bin URL)').setRequired(true)),
+  new SlashCommandBuilder().setName('loaderconfig').setDescription('Update PHANTOM loader config')
+    .addSubcommand((s) => s.setName('set')
+      .setDescription('Set one field')
+      .addStringOption((o) => o.setName('field').setDescription('version | update_url | motd').setRequired(true))
+      .addStringOption((o) => o.setName('value').setDescription('New value').setRequired(true)))
+    .addSubcommand((s) => s.setName('show')
+      .setDescription('Show current loader config')),
 ].map((c) => c.toJSON());
 
 client.once('clientReady', async () => {
@@ -259,6 +415,30 @@ client.on('interactionCreate', async (i) => {
         store.set(id, r); n++;
       }
       return ok(`Queued for ${n} client${n === 1 ? '' : 's'}.`);
+    }
+    case 'release': {
+      const ver = i.options.getString('version');
+      const url = i.options.getString('url');
+      loaderCfg.version    = ver;
+      loaderCfg.update_url = url;
+      saveLoaderCfg();
+      return ok(`Released **v${ver}** → <${url}>\nAll clients will update on next launch.`);
+    }
+    case 'loaderconfig': {
+      const sub = i.options.getSubcommand();
+      if (sub === 'show') {
+        return ok(`\`\`\`json\n${JSON.stringify(loaderCfg, null, 2)}\n\`\`\``);
+      }
+      if (sub === 'set') {
+        const field = i.options.getString('field');
+        const value = i.options.getString('value');
+        if (!['version', 'update_url', 'motd'].includes(field))
+          return ok('Unknown field. Use: version | update_url | motd');
+        loaderCfg[field] = value;
+        saveLoaderCfg();
+        return ok(`Set \`${field}\` → \`${value}\``);
+      }
+      break;
     }
   }
 });

@@ -133,3 +133,34 @@ bot, so this is the trade for not fighting a free tier.
 `/list` · `/block` · `/unblock` · `/unload` · `/msg` · `/broadcast` · `/forget`
 
 `unload` and `msg` fire **once** on the client's next heartbeat, then clear.
+
+---
+
+## 7. Response signing (do this before you rely on blocking)
+
+Until this is set up, a user can point your domain at their own PC and serve a
+fake `{"allow":true}` to defeat a block. Signing closes that.
+
+**Generate the keypair (once):**
+
+```bash
+cd bot
+node gen-keys.js
+```
+
+It prints two blocks:
+
+1. **`SIGN_KEY=...`** — add it as a Railway **Variable** (the private key; keep it secret).
+2. A **`g_ServerPubKey[64]`** C++ array — paste it over the placeholder in
+   `remote.h`, then rebuild the DLL.
+
+Redeploy the bot. Its log should say `[sign] response signing ENABLED`, and the
+DLL console (if you build a debug copy) prints `heartbeat ok (signed)`.
+
+Once the real public key is in `remote.h`, the client **fails closed**: it must
+receive a validly-signed "allow" every so often or it unloads. Default grace is
+10 minutes (`kAuthGraceMs` in `remote.h`), so a short relay outage is fine but a
+sustained one — or anyone suppressing/forging the heartbeat — shuts clients down.
+
+Re-running `gen-keys.js` makes a NEW pair and invalidates every deployed client,
+so keep the output safe.
