@@ -24,6 +24,8 @@
 // ---------------------------------------------------------------------------
 
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   Client, GatewayIntentBits, REST, Routes,
@@ -31,6 +33,30 @@ import {
 } from 'discord.js';
 import { store } from './store.js';
 import { chat } from './chat.js';
+
+// ---------------------------------------------------------------------------
+//  Loader config — served at GET /config for the PHANTOM loader to fetch
+// ---------------------------------------------------------------------------
+const CFG_DIR  = process.env.DATA_DIR || '.';
+const CFG_FILE = path.join(CFG_DIR, 'loader_config.json');
+
+let loaderCfg = { version: '1', update_url: '', motd: '' };
+try {
+  loaderCfg = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'));
+  console.log('[cfg] loaded loader config');
+} catch {
+  console.log('[cfg] no loader_config.json — using defaults');
+}
+
+function saveLoaderCfg() {
+  try {
+    const tmp = CFG_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(loaderCfg, null, 2));
+    fs.renameSync(tmp, CFG_FILE);
+  } catch (e) {
+    console.error('[cfg] save failed:', e.message);
+  }
+}
 
 const {
   BOT_TOKEN, APP_ID, GUILD_ID, ADMIN_ROLE,
@@ -135,6 +161,13 @@ const server = http.createServer((req, res) => {
         messages: chat.since(since),
       });
     });
+    return;
+  }
+
+  // Loader config — PHANTOM loader fetches this to check for updates
+  if (req.method === 'GET' && req.url === '/config') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(loaderCfg));
     return;
   }
 
@@ -244,6 +277,13 @@ const commands = [
       { name: 'warn', value: 'warn' }, { name: 'error', value: 'error' })),
   new SlashCommandBuilder().setName('broadcast').setDescription('Message every client')
     .addStringOption((o) => o.setName('text').setDescription('Message').setRequired(true)),
+  new SlashCommandBuilder().setName('loaderconfig').setDescription('Update PHANTOM loader config')
+    .addSubcommand((s) => s.setName('set')
+      .setDescription('Set one field')
+      .addStringOption((o) => o.setName('field').setDescription('version | update_url | motd').setRequired(true))
+      .addStringOption((o) => o.setName('value').setDescription('New value').setRequired(true)))
+    .addSubcommand((s) => s.setName('show')
+      .setDescription('Show current loader config')),
 ].map((c) => c.toJSON());
 
 client.once('clientReady', async () => {
@@ -311,6 +351,22 @@ client.on('interactionCreate', async (i) => {
         store.set(id, r); n++;
       }
       return ok(`Queued for ${n} client${n === 1 ? '' : 's'}.`);
+    }
+    case 'loaderconfig': {
+      const sub = i.options.getSubcommand();
+      if (sub === 'show') {
+        return ok(`\`\`\`json\n${JSON.stringify(loaderCfg, null, 2)}\n\`\`\``);
+      }
+      if (sub === 'set') {
+        const field = i.options.getString('field');
+        const value = i.options.getString('value');
+        if (!['version', 'update_url', 'motd'].includes(field))
+          return ok('Unknown field. Use: version | update_url | motd');
+        loaderCfg[field] = value;
+        saveLoaderCfg();
+        return ok(`Set \`${field}\` → \`${value}\``);
+      }
+      break;
     }
   }
 });
