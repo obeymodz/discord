@@ -232,6 +232,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Force re-register Discord slash commands (hit once after deploy if commands are stale)
+  if (req.method === 'GET' && req.url === '/register-commands') {
+    const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+    rest.put(
+      GUILD_ID ? Routes.applicationGuildCommands(APP_ID, GUILD_ID)
+               : Routes.applicationCommands(APP_ID),
+      { body: commands }
+    ).then(() => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(`registered ${commands.length} commands`);
+    }).catch((e) => {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('failed: ' + e.message);
+    });
+    return;
+  }
+
   if (req.method !== 'POST' || !req.url.startsWith('/heartbeat')) {
     res.writeHead(200).end('aurora relay');
     return;
